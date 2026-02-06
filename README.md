@@ -49,12 +49,10 @@
 - [Edge](https://microsoftedge.microsoft.com/addons/detail/tampermonkey/iikmkjmpaadaobahmlepeloendndfphd)
 
 ### Шаг 2: Установите скрипт
-1. Откройте **[этот файл](archeage-universal-tool.user.js)** в браузере
-2. Нажмите кнопку **"Raw"**
-3. Tampermonkey автоматически предложит установку
-4. Нажмите **"Установить"**
-
-&gt; **Или** создайте новый скрипт в Tampermonkey и скопируйте туда содержимое файла.
+1. Откройте **[этот файл](https://github.com/Adfazer/ArcheAge-Auto-Sender/blob/main/ArcheAge%20Universal%20Tool%20(Cart%20%2B%20Pins)-3.0.user.js)** в браузере
+2. Нажмите кнопку **Создать новый скрипт** в плагине Tampermonkey
+3. Перенесите содержимое скрипта в появившееся окно.
+4. Файл -> Сохранить
 
 ---
 
