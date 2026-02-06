@@ -1,10 +1,8 @@
-# 🎮 ArcheAge Universal Tool
+# 🎮 ArcheAge-Auto-Sender
 
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-✔%20Supported-00485b?logo=tampermonkey&logoColor=white)](https://www.tampermonkey.net/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/Version-3.0-e94560)](https://github.com/yourusername/archeage-universal-tool)
-
-&gt; Профессиональный инструмент автоматизации для ArcheAge (RU) с единым интерфейсом для управления корзиной и активации пин-кодов.
 
 ---
 
