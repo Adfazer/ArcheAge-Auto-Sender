@@ -2,7 +2,7 @@
 
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-✔%20Supported-00485b?logo=tampermonkey&logoColor=white)](https://www.tampermonkey.net/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.1-e94560)](https://github.com/Adfazer/ArcheAge-Auto-Sender)
+[![Version](https://img.shields.io/badge/Version-3.3-e94560)](https://github.com/Adfazer/ArcheAge-Auto-Sender)
 
 ---
 
