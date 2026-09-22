@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ArcheAge Universal Tool (Cart + Pins + FunPay)
 // @namespace    http://tampermonkey.net/
-// @version      3.7
+// @version      3.8
 // @description  Автоматическая отправка предметов из корзины, активация пин-кодов и импорт пинов из заказов FunPay с единым интерфейсом
 // @author       You
 // @homepageURL  https://github.com/Adfazer/ArcheAge-Auto-Sender
@@ -808,11 +808,38 @@
     }
 
     function clearNameSelection() {
+        const selected = [...state.cart.selectedNames];
+        const selectedSet = new Set(selected);
+
+        // Снимаем и выбор (галочки + красную подсветку) с предметов отмеченных названий,
+        // чтобы «Снять отметки» реально снимало выделение в таблице
+        let cleared = 0;
+        getCartItems().forEach(item => {
+            if (item.checkbox.checked && selectedSet.has(itemStackKey(item))) {
+                item.checkbox.checked = false;
+                cleared++;
+            }
+        });
+
         state.cart.selectedNames.clear();
         const boxes = document.querySelectorAll('#cart-name-list input[data-name-key]');
         if (boxes) boxes.forEach(box => { box.checked = false; });
+
+        updateRowHighlighting();
+        updateStats();
         updateNameSelectionInfo();
-        log('Отметка названий сброшена', 'info');
+
+        if (cleared > 0) {
+            log(`Отметки названий сняты, выбор снят с ${cleared} предметов`, 'info');
+        } else {
+            log('Отметки названий сняты', 'info');
+        }
+
+        // Если красным остались предметы, отмеченные вручную, подскажем, чем их снять
+        const stillChecked = getCartItems().filter(item => item.checkbox.checked).length;
+        if (stillChecked > 0) {
+            log(`Осталось выбрано предметов: ${stillChecked} — снять можно кнопкой «☐ Снять выбор»`, 'info');
+        }
     }
 
     function selectByName() {
