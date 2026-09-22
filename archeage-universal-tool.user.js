@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ArcheAge Universal Tool (Cart + Pins + FunPay)
 // @namespace    http://tampermonkey.net/
-// @version      3.5
+// @version      3.6
 // @description  Автоматическая отправка предметов из корзины, активация пин-кодов и импорт пинов из заказов FunPay с единым интерфейсом
 // @author       You
 // @homepageURL  https://github.com/Adfazer/ArcheAge-Auto-Sender
@@ -61,6 +61,9 @@
     let state = {
         cart: {
             selectedItems: new Set(),
+            // Отмеченные названия (ключи стопок) для блока «Выбор по названию»:
+            // поддерживается множественный выбор + фильтр по части названия
+            selectedNames: new Set(),
             isSending: false,
             shouldStop: false,
             isCollapsed: false
@@ -251,7 +254,95 @@
             font-size: 13px;
             outline: none;
         }
-        .aa-tool-select:focus {
+        .aa-tool-input {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+            border-radius: 6px;
+            border: 1px solid #e94560;
+            background: #0f3460;
+            color: white;
+            font-size: 13px;
+            outline: none;
+        }
+        .aa-tool-input::placeholder {
+            color: #7f8aa3;
+        }
+        .aa-name-list {
+            max-height: 190px;
+            overflow-y: auto;
+            background: rgba(0,0,0,0.3);
+            border: 1px solid rgba(233, 69, 96, 0.3);
+            border-radius: 6px;
+            padding: 4px;
+            margin-top: 6px;
+        }
+        .aa-name-list::-webkit-scrollbar {
+            width: 8px;
+        }
+        .aa-name-list::-webkit-scrollbar-track {
+            background: rgba(0,0,0,0.2);
+            border-radius: 4px;
+        }
+        .aa-name-list::-webkit-scrollbar-thumb {
+            background: #e94560;
+            border-radius: 4px;
+        }
+        .aa-name-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 5px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            user-select: none;
+        }
+        .aa-name-item:hover {
+            background: rgba(233, 69, 96, 0.14);
+        }
+        .aa-name-item input[type="checkbox"] {
+            flex: 0 0 auto;
+            margin: 0;
+            cursor: pointer;
+            accent-color: #e94560;
+        }
+        .aa-name-text {
+            flex: 1 1 auto;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .aa-name-count {
+            flex: 0 0 auto;
+            color: #8b93a7;
+            font-size: 11px;
+        }
+        .aa-name-empty {
+            padding: 8px 4px;
+            text-align: center;
+            color: #8b93a7;
+            font-size: 12px;
+        }
+        .aa-name-hint {
+            margin-top: 6px;
+            font-size: 11px;
+            color: #aaa;
+            text-align: center;
+        }
+        .aa-name-toolbar {
+            display: flex;
+            gap: 6px;
+            margin-top: 6px;
+        }
+        .aa-name-toolbar .aa-tool-btn {
+            flex: 1 1 0;
+            margin-top: 0;
+            padding: 6px 4px;
+            font-size: 12px;
+        }
+        .aa-tool-select:focus,
+        .aa-tool-input:focus {
             box-shadow: 0 0 0 2px rgba(233, 69, 96, 0.3);
         }
         .aa-tool-stats {
@@ -595,13 +686,14 @@
     function escapeHtml(text) {
         const div = document.createElement('div');
         div.textContent = text;
-        return div.innerHTML;
+        // Кавычки тоже экранируем: значения подставляются и в атрибуты
+        return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
-    function refreshNameSelect() {
-        const select = document.getElementById('cart-name-select');
-        if (!select) return;
+    // ===== «Выбор по названию»: фильтр по части названия + множественный выбор =====
 
+    // Счётчики по названиям-стопкам: сколько доступно и сколько на таймере
+    function nameCounts() {
         const counts = new Map();
         getCartItems().forEach(item => {
             const key = itemStackKey(item);
@@ -610,45 +702,142 @@
             else entry.available++;
             counts.set(key, entry);
         });
+        return counts;
+    }
 
-        const previousValue = select.value;
-        const options = [...counts.entries()]
-            .sort((a, b) => a[0].localeCompare(b[0], 'ru'))
-            .map(([key, entry]) => {
-                const lockedNote = entry.locked > 0 ? `, ${entry.locked} на таймере` : '';
-                return `<option value="${escapeHtml(key)}">${escapeHtml(key)} (${entry.available} шт.${lockedNote})</option>`;
-            })
-            .join('');
+    // Фильтр списка названий по части строки (регистр не важен, пробелы по краям отбрасываются)
+    function filterStackKeys(keys, query) {
+        const q = String(query || '').trim().toLowerCase();
+        if (!q) return keys.slice();
+        return keys.filter(key => key.toLowerCase().includes(q));
+    }
 
-        select.innerHTML = `<option value="">-- Выберите название --</option>${options}`;
-        if (previousValue && counts.has(previousValue)) {
-            select.value = previousValue;
+    function updateNameSelectionInfo() {
+        const info = document.getElementById('cart-name-selected');
+        if (info) {
+            const n = state.cart.selectedNames.size;
+            info.textContent = n > 0 ? `Отмечено названий: ${n}` : 'Названия не отмечены';
+        }
+        const applyBtn = document.getElementById('cart-select-by-name');
+        if (applyBtn) {
+            const n = state.cart.selectedNames.size;
+            applyBtn.textContent = n > 0 ? `☑️ Выбрать только эти (${n})` : '☑️ Выбрать только эти';
         }
     }
 
+    function refreshNameSelect() {
+        const list = document.getElementById('cart-name-list');
+        if (!list) return;
+
+        const counts = nameCounts();
+        // Названия, которых больше нет в корзине (например, уже отправлены) — забываем
+        [...state.cart.selectedNames].forEach(key => {
+            if (!counts.has(key)) state.cart.selectedNames.delete(key);
+        });
+
+        const allKeys = [...counts.keys()].sort((a, b) => a.localeCompare(b, 'ru'));
+        const searchEl = document.getElementById('cart-name-search');
+        const visibleKeys = filterStackKeys(allKeys, searchEl ? searchEl.value : '');
+
+        list.innerHTML = '';
+        if (visibleKeys.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'aa-name-empty';
+            empty.textContent = allKeys.length === 0
+                ? 'В корзине нет предметов'
+                : 'Ничего не найдено по фильтру';
+            list.appendChild(empty);
+        }
+
+        visibleKeys.forEach(key => {
+            const entry = counts.get(key);
+            const row = document.createElement('label');
+            row.className = 'aa-name-item';
+
+            const box = document.createElement('input');
+            box.type = 'checkbox';
+            box.checked = state.cart.selectedNames.has(key);
+            box.setAttribute('data-name-key', key);
+            box.addEventListener('change', () => {
+                if (box.checked) state.cart.selectedNames.add(key);
+                else state.cart.selectedNames.delete(key);
+                updateNameSelectionInfo();
+            });
+
+            const text = document.createElement('span');
+            text.className = 'aa-name-text';
+            text.textContent = key;
+            text.title = key;
+
+            const countEl = document.createElement('span');
+            countEl.className = 'aa-name-count';
+            countEl.textContent = entry.locked > 0
+                ? `${entry.available} шт., ${entry.locked} на таймере`
+                : `${entry.available} шт.`;
+
+            row.appendChild(box);
+            row.appendChild(text);
+            row.appendChild(countEl);
+            list.appendChild(row);
+        });
+
+        const counter = document.getElementById('cart-name-counter');
+        if (counter) {
+            counter.textContent = visibleKeys.length === allKeys.length
+                ? `Всего названий: ${allKeys.length}`
+                : `Показано: ${visibleKeys.length} из ${allKeys.length} (фильтр)`;
+        }
+
+        updateNameSelectionInfo();
+    }
+
+    // Отметить все названия, оставшиеся после фильтра
+    function markFoundNames() {
+        const boxes = document.querySelectorAll('#cart-name-list input[data-name-key]');
+        if (!boxes || boxes.length === 0) {
+            log('По фильтру ничего не найдено', 'warning');
+            return;
+        }
+        boxes.forEach(box => {
+            box.checked = true;
+            const key = box.getAttribute('data-name-key');
+            if (key) state.cart.selectedNames.add(key);
+        });
+        updateNameSelectionInfo();
+        log(`Отмечено названий: ${boxes.length} (все, что показаны по фильтру)`, 'info');
+    }
+
+    function clearNameSelection() {
+        state.cart.selectedNames.clear();
+        const boxes = document.querySelectorAll('#cart-name-list input[data-name-key]');
+        if (boxes) boxes.forEach(box => { box.checked = false; });
+        updateNameSelectionInfo();
+        log('Отметка названий сброшена', 'info');
+    }
+
     function selectByName() {
-        const select = document.getElementById('cart-name-select');
-        const stackKey = select ? select.value : '';
-        if (!stackKey) {
-            alert('Выберите название предмета из списка!');
+        const selected = [...state.cart.selectedNames];
+        if (selected.length === 0) {
+            alert('Отметьте одно или несколько названий в списке (список можно отфильтровать поиском)!');
             return;
         }
 
+        const selectedSet = new Set(selected);
         let count = 0;
         let lockedCount = 0;
         getCartItems().forEach(item => {
-            const matches = itemStackKey(item) === stackKey;
+            const matches = selectedSet.has(itemStackKey(item));
             item.checkbox.checked = matches && !item.locked;
             if (item.checkbox.checked) count++;
             if (matches && item.locked) lockedCount++;
         });
         updateRowHighlighting();
         updateStats();
-        if (lockedCount > 0) {
-            log(`Выбрано ${count} предметов «${stackKey}», ещё ${lockedCount} на таймере — пропущены`, 'warning');
-        } else {
-            log(`Выбрано ${count} предметов «${stackKey}» (остальные сняты)`, 'success');
-        }
+
+        const label = selected.length === 1 ? `«${selected[0]}»` : `${selected.length} названий`;
+        const lockedNote = lockedCount > 0 ? `, ещё ${lockedCount} на таймере — пропущены` : '';
+        log(`Выбрано ${count} предметов (${label})${lockedNote}, остальные сняты`,
+            lockedCount > 0 ? 'warning' : 'success');
     }
 
     function buyPinsButtonHtml() {
@@ -850,6 +1039,11 @@
         document.getElementById('cart-deselect-all')?.addEventListener('click', deselectAll);
         document.getElementById('cart-invert')?.addEventListener('click', invertSelection);
         document.getElementById('cart-select-by-name')?.addEventListener('click', selectByName);
+
+        // Фильтр по части названия + множественный выбор названий
+        document.getElementById('cart-name-search')?.addEventListener('input', refreshNameSelect);
+        document.getElementById('cart-name-mark-found')?.addEventListener('click', markFoundNames);
+        document.getElementById('cart-name-clear')?.addEventListener('click', clearNameSelection);
 
         const selectUpToBtn = document.getElementById('cart-select-up-to');
         if (selectUpToBtn) {
@@ -1386,10 +1580,16 @@ ${buyPinsButtonHtml()}
                 </div>
 
                 <div class="aa-tool-section">
-                    <label>🏷️ Выбор по названию:</label>
-                    <select id="cart-name-select" class="aa-tool-select">
-                        <option value="">-- Выберите название --</option>
-                    </select>
+                    <label>🏷️ Выбор по названию (можно несколько):</label>
+                    <input type="text" id="cart-name-search" class="aa-tool-input"
+                           placeholder="Фильтр: часть названия…" autocomplete="off">
+                    <div id="cart-name-counter" class="aa-name-hint">Названий: 0</div>
+                    <div id="cart-name-list" class="aa-name-list"></div>
+                    <div class="aa-name-toolbar">
+                        <button id="cart-name-mark-found" class="aa-tool-btn secondary">☑️ Отметить найденные</button>
+                        <button id="cart-name-clear" class="aa-tool-btn secondary">✖ Снять отметки</button>
+                    </div>
+                    <div id="cart-name-selected" class="aa-name-hint">Названия не отмечены</div>
                     <button id="cart-select-by-name" class="aa-tool-btn secondary">
                         ☑️ Выбрать только эти
                     </button>
