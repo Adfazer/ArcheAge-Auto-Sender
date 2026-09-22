@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ArcheAge Universal Tool (Cart + Pins + FunPay)
 // @namespace    http://tampermonkey.net/
-// @version      3.8
+// @version      3.9
 // @description  Автоматическая отправка предметов из корзины, активация пин-кодов и импорт пинов из заказов FunPay с единым интерфейсом
 // @author       You
 // @homepageURL  https://github.com/Adfazer/ArcheAge-Auto-Sender
@@ -56,6 +56,81 @@
             apiUrl: 'https://archeage.ru/dynamic/pin/?a=activate'
         }
     };
+
+    // ==================== НАСТРОЙКИ ====================
+    // Изменяются через ⚙️ в шапке панели, сохраняются в браузере (Tampermonkey)
+    // и применяются сразу, без перезагрузки страницы
+
+    const DEFAULT_CONFIG = {
+        cart: { batchSize: 5, delayBetweenBatches: 2000 },
+        pin: { delayBetweenPins: 2000 }
+    };
+
+    const SETTINGS_KEY = 'aa_settings';
+
+    const SETTINGS_FIELDS = {
+        batchSize: { label: 'Предметов в пачке (корзина)', min: 1, max: 50, hint: '1 – 50' },
+        delayBetweenBatches: { label: 'Задержка между пачками, мс', min: 0, max: 120000, hint: '0 – 120000 (2000 = 2 сек)' },
+        delayBetweenPins: { label: 'Задержка между пинами, мс', min: 0, max: 120000, hint: '0 – 120000 (2000 = 2 сек)' }
+    };
+
+    // Приводим значение к допустимому диапазону; пустое/нечисловое — заменяем
+    // на стандартное (важно: Number('') === 0, поэтому пустую строку отсекаем явно)
+    function clampSetting(key, value, fallback) {
+        const field = SETTINGS_FIELDS[key];
+        if (!field) return fallback;
+        const raw = (typeof value === 'string') ? value.trim() : value;
+        if (raw === '' || raw === null || raw === undefined || typeof raw === 'boolean') return fallback;
+        const num = Math.round(Number(raw));
+        if (!Number.isFinite(num)) return fallback;
+        return Math.min(field.max, Math.max(field.min, num));
+    }
+
+    function applySettings(values) {
+        const clean = {
+            batchSize: clampSetting('batchSize', values.batchSize, DEFAULT_CONFIG.cart.batchSize),
+            delayBetweenBatches: clampSetting('delayBetweenBatches', values.delayBetweenBatches, DEFAULT_CONFIG.cart.delayBetweenBatches),
+            delayBetweenPins: clampSetting('delayBetweenPins', values.delayBetweenPins, DEFAULT_CONFIG.pin.delayBetweenPins)
+        };
+        CONFIG.cart.batchSize = clean.batchSize;
+        CONFIG.cart.delayBetweenBatches = clean.delayBetweenBatches;
+        CONFIG.pin.delayBetweenPins = clean.delayBetweenPins;
+        return clean;
+    }
+
+    function currentSettings() {
+        return {
+            batchSize: CONFIG.cart.batchSize,
+            delayBetweenBatches: CONFIG.cart.delayBetweenBatches,
+            delayBetweenPins: CONFIG.pin.delayBetweenPins
+        };
+    }
+
+    function loadSavedSettings() {
+        let saved = null;
+        try {
+            saved = JSON.parse(GM_getValue(SETTINGS_KEY, 'null'));
+        } catch (e) {
+            saved = null;
+        }
+        const src = (saved && typeof saved === 'object') ? saved : {};
+        return applySettings(Object.assign({
+            batchSize: DEFAULT_CONFIG.cart.batchSize,
+            delayBetweenBatches: DEFAULT_CONFIG.cart.delayBetweenBatches,
+            delayBetweenPins: DEFAULT_CONFIG.pin.delayBetweenPins
+        }, src));
+    }
+
+    function saveSettings(values) {
+        const clean = applySettings(values);
+        let saved = true;
+        try {
+            GM_setValue(SETTINGS_KEY, JSON.stringify(clean));
+        } catch (e) {
+            saved = false;
+        }
+        return { saved, settings: clean };
+    }
 
     // Состояние
     let state = {
@@ -142,6 +217,126 @@
             background: rgba(255,255,255,0.06);
             border-radius: 4px;
             padding: 1px 5px;
+        }
+        .aa-tool-header-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .aa-tool-settings {
+            background: none;
+            border: none;
+            color: #e94560;
+            font-size: 16px;
+            cursor: pointer;
+            padding: 0;
+            width: 30px;
+            height: 30px;
+            border-radius: 6px;
+            transition: background-color 0.2s;
+        }
+        .aa-tool-settings:hover {
+            background-color: rgba(233, 69, 96, 0.2);
+        }
+        /* Окно настроек */
+        .aa-settings-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.55);
+            z-index: 100000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .aa-settings-dialog {
+            width: 400px;
+            max-width: calc(100vw - 24px);
+            max-height: calc(100vh - 40px);
+            overflow-y: auto;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            border: 2px solid #e94560;
+            border-radius: 12px;
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+            color: #fff;
+            font-size: 13px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        .aa-settings-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            border-bottom: 1px solid #e94560;
+            color: #e94560;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        .aa-settings-close {
+            background: none;
+            border: none;
+            color: #e94560;
+            font-size: 16px;
+            cursor: pointer;
+            padding: 0 4px;
+        }
+        .aa-settings-body {
+            padding: 12px 16px;
+        }
+        .aa-settings-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .aa-settings-row span {
+            color: #ddd;
+        }
+        .aa-settings-row input {
+            width: 120px;
+            padding: 6px 8px;
+            box-sizing: border-box;
+            border-radius: 6px;
+            border: 1px solid #e94560;
+            background: #0f3460;
+            color: #fff;
+            font-size: 13px;
+            outline: none;
+        }
+        .aa-settings-hint {
+            margin-top: 2px;
+            font-size: 11px;
+            color: #8b93a7;
+            text-align: right;
+        }
+        .aa-settings-note {
+            margin-top: 12px;
+            font-size: 11px;
+            color: #8b93a7;
+        }
+        .aa-settings-status {
+            margin-top: 8px;
+            font-size: 12px;
+            min-height: 16px;
+        }
+        .aa-settings-status.success {
+            color: #2ecc71;
+        }
+        .aa-settings-status.error {
+            color: #e74c3c;
+        }
+        .aa-settings-foot {
+            display: flex;
+            gap: 8px;
+            padding: 12px 16px;
+            border-top: 1px solid rgba(233, 69, 96, 0.35);
+        }
+        .aa-settings-foot .aa-tool-btn {
+            flex: 1 1 0;
+            margin-top: 0;
         }
         .aa-tool-toggle {
             background: none;
@@ -288,7 +483,9 @@
             background: #e94560;
             border-radius: 4px;
         }
-        .aa-name-item {
+        /* Селектор с .aa-tool-section: иначе label внутри секции
+           (text-transform: uppercase, color #aaa) перебивает наши стили */
+        .aa-tool-section .aa-name-item {
             display: flex;
             align-items: center;
             gap: 6px;
@@ -297,6 +494,12 @@
             cursor: pointer;
             font-size: 12px;
             user-select: none;
+            /* Названия предметов показываем как есть, а не ЗАГЛАВНЫМИ */
+            text-transform: none;
+            letter-spacing: normal;
+            color: #e8e8e8;
+            font-weight: normal;
+            margin-bottom: 0;
         }
         .aa-name-item:hover {
             background: rgba(233, 69, 96, 0.14);
@@ -640,6 +843,7 @@
         if (lockedEl) lockedEl.textContent = locked.length;
         if (selectedEl) selectedEl.textContent = selected.length;
         if (batchesEl) batchesEl.textContent = Math.ceil(selected.length / CONFIG.cart.batchSize);
+        updateBatchLabel();
     }
 
     function selectAll() {
@@ -876,6 +1080,143 @@
                 </div>`;
     }
 
+    // ==================== ОКНО НАСТРОЕК (⚙️) ====================
+
+    function settingsRowHtml(key) {
+        const field = SETTINGS_FIELDS[key];
+        return `
+                    <div class="aa-settings-group">
+                        <label class="aa-settings-row">
+                            <span>${field.label}</span>
+                            <input type="number" id="aa-set-${key}" min="${field.min}" max="${field.max}" step="1">
+                        </label>
+                        <div class="aa-settings-hint">допустимо: ${field.hint}</div>
+                    </div>`;
+    }
+
+    let settingsEscHandler = null;
+
+    function closeSettingsDialog() {
+        const overlay = document.getElementById('aa-settings-overlay');
+        if (overlay) overlay.remove();
+        if (settingsEscHandler) {
+            document.removeEventListener('keydown', settingsEscHandler);
+            settingsEscHandler = null;
+        }
+    }
+
+    function openSettingsDialog() {
+        closeSettingsDialog();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'aa-settings-overlay';
+        overlay.className = 'aa-settings-overlay';
+        overlay.innerHTML = `
+            <div class="aa-settings-dialog">
+                <div class="aa-settings-head">
+                    <span>⚙️ Настройки</span>
+                    <button class="aa-settings-close" title="Закрыть">✕</button>
+                </div>
+                <div class="aa-settings-body">
+                    ${settingsRowHtml('batchSize')}
+                    ${settingsRowHtml('delayBetweenBatches')}
+                    ${settingsRowHtml('delayBetweenPins')}
+                    <div class="aa-settings-note">Настройки применяются сразу (перезагрузка не нужна) и сохраняются в браузере. Стандартные значения: пачка ${DEFAULT_CONFIG.cart.batchSize} шт., задержки ${DEFAULT_CONFIG.cart.delayBetweenBatches} мс.</div>
+                    <div id="aa-settings-status" class="aa-settings-status"></div>
+                </div>
+                <div class="aa-settings-foot">
+                    <button id="aa-settings-reset" class="aa-tool-btn secondary">Сбросить к стандартным</button>
+                    <button id="aa-settings-save" class="aa-tool-btn primary">Сохранить</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        const inputEl = (key) => document.getElementById('aa-set-' + key);
+        const readInputs = () => ({
+            batchSize: inputEl('batchSize') ? inputEl('batchSize').value : '',
+            delayBetweenBatches: inputEl('delayBetweenBatches') ? inputEl('delayBetweenBatches').value : '',
+            delayBetweenPins: inputEl('delayBetweenPins') ? inputEl('delayBetweenPins').value : ''
+        });
+        const writeInputs = (values) => {
+            Object.keys(SETTINGS_FIELDS).forEach(key => {
+                const el = inputEl(key);
+                if (el) el.value = String(values[key]);
+            });
+        };
+        const setStatus = (text, type) => {
+            const el = document.getElementById('aa-settings-status');
+            if (el) {
+                el.textContent = text;
+                el.className = 'aa-settings-status' + (type ? ' ' + type : '');
+            }
+        };
+
+        writeInputs(currentSettings());
+
+        const saveBtn = document.getElementById('aa-settings-save');
+        const resetBtn = document.getElementById('aa-settings-reset');
+        const closeBtn = overlay.querySelector('.aa-settings-close');
+
+        if (saveBtn) {
+            saveBtn.addEventListener('click', () => {
+                const { saved, settings: clean } = saveSettings(readInputs());
+                writeInputs(clean);
+                if (typeof updateBatchLabel === 'function') updateBatchLabel();
+                if (typeof updateStats === 'function' && isCartPage) updateStats();
+                setStatus(saved
+                    ? `Сохранено: пачка ${clean.batchSize} шт., задержки ${clean.delayBetweenBatches}/${clean.delayBetweenPins} мс`
+                    : 'Значения применены на этой странице, но сохранить в браузере не удалось',
+                    saved ? 'success' : 'error');
+                log(`Настройки: пачка ${clean.batchSize} шт., задержка между пачками ${clean.delayBetweenBatches} мс, между пинами ${clean.delayBetweenPins} мс`, saved ? 'success' : 'warning');
+            });
+        }
+
+        if (resetBtn) {
+            resetBtn.addEventListener('click', () => {
+                const { settings: clean } = saveSettings({
+                    batchSize: DEFAULT_CONFIG.cart.batchSize,
+                    delayBetweenBatches: DEFAULT_CONFIG.cart.delayBetweenBatches,
+                    delayBetweenPins: DEFAULT_CONFIG.pin.delayBetweenPins
+                });
+                writeInputs(clean);
+                if (typeof updateBatchLabel === 'function') updateBatchLabel();
+                if (typeof updateStats === 'function' && isCartPage) updateStats();
+                setStatus(`Стандартные значения: пачка ${clean.batchSize} шт., задержки ${clean.delayBetweenBatches} мс`, 'success');
+                log('Настройки сброшены к стандартным', 'info');
+            });
+        }
+
+        if (closeBtn) closeBtn.addEventListener('click', closeSettingsDialog);
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) closeSettingsDialog();
+        });
+        overlay.querySelectorAll('input').forEach(inp => {
+            inp.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && saveBtn) saveBtn.click();
+            });
+        });
+
+        settingsEscHandler = (e) => {
+            if (e.key === 'Escape') closeSettingsDialog();
+        };
+        document.addEventListener('keydown', settingsEscHandler);
+    }
+
+    function setupSettingsButton() {
+        const btn = document.getElementById('aa-tool-settings-btn');
+        if (!btn) return;
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openSettingsDialog();
+        });
+    }
+
+    function updateBatchLabel() {
+        const label = document.getElementById('cart-batch-label');
+        if (label) label.textContent = `Пачек (по ${CONFIG.cart.batchSize}):`;
+    }
+
     function togglePanel() {
         const panel = document.getElementById('aa-tool-panel');
         const toggleBtn = document.getElementById('aa-tool-toggle-btn');
@@ -1107,6 +1448,8 @@
     }
 
     function setupCartEventListeners() {
+        setupSettingsButton();
+
         const toggleBtn = document.getElementById('aa-tool-toggle-btn');
         if (toggleBtn) {
             toggleBtn.addEventListener('click', (e) => {
@@ -1439,6 +1782,8 @@
     }
 
     function setupPinEventListeners() {
+        setupSettingsButton();
+
         const toggleBtn = document.getElementById('aa-tool-toggle-btn');
         if (toggleBtn) {
             toggleBtn.addEventListener('click', (e) => {
@@ -1542,6 +1887,8 @@
     }
 
     function setupFunpayEventListeners(pins) {
+        setupSettingsButton();
+
         const toggleBtn = document.getElementById('aa-tool-toggle-btn');
         if (toggleBtn) {
             toggleBtn.addEventListener('click', (e) => {
@@ -1597,7 +1944,10 @@
         panel.innerHTML = `
             <div class="aa-tool-header">
                 <h3>🛒 FunPay → ArcheAge <span class="aa-tool-ver">v${SCRIPT_VERSION}</span></h3>
-                <button id="aa-tool-toggle-btn" class="aa-tool-toggle" title="Свернуть">◀</button>
+                <div class="aa-tool-header-actions">
+                    <button id="aa-tool-settings-btn" class="aa-tool-settings" title="Настройки">⚙️</button>
+                    <button id="aa-tool-toggle-btn" class="aa-tool-toggle" title="Свернуть">◀</button>
+                </div>
             </div>
             <div class="aa-tool-content">
                 <div class="aa-tool-section">
@@ -1657,7 +2007,10 @@ ${buyPinsButtonHtml()}
         panel.innerHTML = `
             <div class="aa-tool-header">
                 <h3>📦 Корзина Auto-Sender <span class="aa-tool-ver">v${SCRIPT_VERSION}</span></h3>
-                <button id="aa-tool-toggle-btn" class="aa-tool-toggle" title="Свернуть">◀</button>
+                <div class="aa-tool-header-actions">
+                    <button id="aa-tool-settings-btn" class="aa-tool-settings" title="Настройки">⚙️</button>
+                    <button id="aa-tool-toggle-btn" class="aa-tool-toggle" title="Свернуть">◀</button>
+                </div>
             </div>
             <div class="aa-tool-content">
                 <div class="aa-tool-section">
@@ -1709,7 +2062,7 @@ ${buyPinsButtonHtml()}
                         <div><span>Всего предметов:</span><span id="cart-total">0</span></div>
                         <div><span>На таймере (недоступно):</span><span id="cart-locked" style="color:#f39c12;">0</span></div>
                         <div><span>Выбрано:</span><span id="cart-selected">0</span></div>
-                        <div><span>Пачек (по ${CONFIG.cart.batchSize}):</span><span id="cart-batches">0</span></div>
+                        <div><span id="cart-batch-label">Пачек (по ${CONFIG.cart.batchSize}):</span><span id="cart-batches">0</span></div>
                     </div>
                 </div>
 
@@ -1752,7 +2105,10 @@ ${buyPinsButtonHtml()}
         panel.innerHTML = `
             <div class="aa-tool-header">
                 <h3>🔑 Активация Пин-кодов <span class="aa-tool-ver">v${SCRIPT_VERSION}</span></h3>
-                <button id="aa-tool-toggle-btn" class="aa-tool-toggle" title="Свернуть">◀</button>
+                <div class="aa-tool-header-actions">
+                    <button id="aa-tool-settings-btn" class="aa-tool-settings" title="Настройки">⚙️</button>
+                    <button id="aa-tool-toggle-btn" class="aa-tool-toggle" title="Свернуть">◀</button>
+                </div>
             </div>
             <div class="aa-tool-content">
                 <div class="aa-tool-section">
@@ -1816,6 +2172,13 @@ ${buyPinsButtonHtml()}
     // ==================== INITIALIZATION ====================
 
     function init() {
+        // Подтягиваем сохранённые настройки (пачка, задержки) до создания панели
+        try {
+            loadSavedSettings();
+        } catch (e) {
+            console.log('[ArcheAgeTool] Не удалось загрузить настройки:', e);
+        }
+
         if (isCartPage) {
             let attempts = 0;
             const maxAttempts = 20;
