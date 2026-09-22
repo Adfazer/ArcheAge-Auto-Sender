@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ArcheAge Universal Tool (Cart + Pins + FunPay)
 // @namespace    http://tampermonkey.net/
-// @version      3.9
+// @version      3.10
 // @description  Автоматическая отправка предметов из корзины, активация пин-кодов и импорт пинов из заказов FunPay с единым интерфейсом
 // @author       You
 // @homepageURL  https://github.com/Adfazer/ArcheAge-Auto-Sender
@@ -1217,23 +1217,72 @@
         if (label) label.textContent = `Пачек (по ${CONFIG.cart.batchSize}):`;
     }
 
+    // ==================== СОСТОЯНИЕ ПАНЕЛИ (свёрнута / развёрнута) ====================
+    // Запоминается между загрузками страницы: свёрнутая панель остаётся свёрнутой
+
+    const UI_STATE_KEY = 'aa_ui_state';
+
+    function loadUiState() {
+        let saved = null;
+        try {
+            saved = JSON.parse(GM_getValue(UI_STATE_KEY, 'null'));
+        } catch (e) {
+            saved = null;
+        }
+        const collapsed = (saved && typeof saved === 'object' && saved.collapsed && typeof saved.collapsed === 'object')
+            ? saved.collapsed
+            : {};
+        const result = { cart: false, pin: false, funpay: false };
+        Object.keys(result).forEach(key => {
+            if (typeof collapsed[key] === 'boolean') result[key] = collapsed[key];
+        });
+        return result;
+    }
+
+    function saveUiState() {
+        try {
+            GM_setValue(UI_STATE_KEY, JSON.stringify({
+                collapsed: {
+                    cart: state.cart.isCollapsed === true,
+                    pin: state.pin.isCollapsed === true,
+                    funpay: state.funpay.isCollapsed === true
+                }
+            }));
+        } catch (e) {
+            // нет доступа к хранилищу — просто не запоминаем между загрузками
+        }
+    }
+
+    function currentPanelState() {
+        return isCartPage ? state.cart : (isFunpayPage ? state.funpay : state.pin);
+    }
+
+    // Привести панель к сохранённому состоянию (вызывается после создания панели)
+    function applyCollapsedState() {
+        const panel = document.getElementById('aa-tool-panel');
+        const toggleBtn = document.getElementById('aa-tool-toggle-btn');
+        if (!panel) return;
+
+        const collapsed = currentPanelState().isCollapsed === true;
+        if (collapsed) panel.classList.add('collapsed');
+        else panel.classList.remove('collapsed');
+
+        if (toggleBtn) {
+            toggleBtn.textContent = collapsed ? '▶' : '◀';
+            toggleBtn.title = collapsed ? 'Развернуть' : 'Свернуть';
+        }
+    }
+
     function togglePanel() {
         const panel = document.getElementById('aa-tool-panel');
         const toggleBtn = document.getElementById('aa-tool-toggle-btn');
         if (!panel || !toggleBtn) return;
 
-        const currentState = isCartPage ? state.cart : (isFunpayPage ? state.funpay : state.pin);
+        const currentState = currentPanelState();
         currentState.isCollapsed = !currentState.isCollapsed;
 
-        if (currentState.isCollapsed) {
-            panel.classList.add('collapsed');
-            toggleBtn.textContent = '▶';
-            toggleBtn.title = 'Развернуть';
-        } else {
-            panel.classList.remove('collapsed');
-            toggleBtn.textContent = '◀';
-            toggleBtn.title = 'Свернуть';
-        }
+        applyCollapsedState();
+        saveUiState();   // чтобы состояние сохранилось после обновления страницы
     }
 
     // Разбор ответа отправки из корзины. Сервер отвечает HTTP 200 даже при отказе,
@@ -1985,6 +2034,7 @@ ${buyPinsButtonHtml()}
         `;
 
         document.body.appendChild(panel);
+        applyCollapsedState();
         setupFunpayEventListeners(pins);
         log(`Найдено ${pins.length} пин-кодов в заказе #${orderId}`, 'info');
         log('«Активировать» откроет archeage.ru и подставит пины автоматически', 'info');
@@ -2088,6 +2138,7 @@ ${buyPinsButtonHtml()}
         `;
 
         document.body.appendChild(panel);
+        applyCollapsedState();
         setupCartEventListeners();
         setupRowClickHandlers();
         refreshNameSelect();
@@ -2164,6 +2215,7 @@ ${buyPinsButtonHtml()}
         `;
 
         document.body.appendChild(panel);
+        applyCollapsedState();
         setupPinEventListeners();
         log('Панель активации пин-кодов загружена. Выберите файл с пинами!', 'info');
         loadPendingFunpayTransfer();
@@ -2172,11 +2224,19 @@ ${buyPinsButtonHtml()}
     // ==================== INITIALIZATION ====================
 
     function init() {
-        // Подтягиваем сохранённые настройки (пачка, задержки) до создания панели
+        // Подтягиваем сохранённые настройки и состояние панели до её создания
         try {
             loadSavedSettings();
         } catch (e) {
             console.log('[ArcheAgeTool] Не удалось загрузить настройки:', e);
+        }
+        try {
+            const ui = loadUiState();
+            state.cart.isCollapsed = ui.cart;
+            state.pin.isCollapsed = ui.pin;
+            state.funpay.isCollapsed = ui.funpay;
+        } catch (e) {
+            console.log('[ArcheAgeTool] Не удалось загрузить состояние панели:', e);
         }
 
         if (isCartPage) {
