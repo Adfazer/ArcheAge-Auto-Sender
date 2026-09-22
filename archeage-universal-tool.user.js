@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ArcheAge Universal Tool (Cart + Pins + FunPay)
 // @namespace    http://tampermonkey.net/
-// @version      3.4
+// @version      3.5
 // @description  Автоматическая отправка предметов из корзины, активация пин-кодов и импорт пинов из заказов FunPay с единым интерфейсом
 // @author       You
 // @homepageURL  https://github.com/Adfazer/ArcheAge-Auto-Sender
@@ -520,9 +520,18 @@
             const entry = document.createElement('div');
             entry.className = type;
             entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-            logContainer.insertBefore(entry, logContainer.firstChild);
-            if (logContainer.children.length > 50) {
-                logContainer.removeChild(logContainer.lastChild);
+
+            // Привычный порядок: новые строки добавляются В КОНЕЦ лога
+            const atBottom = logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight < 24;
+            logContainer.appendChild(entry);
+            // Лимит 50 строк — убираем самые старые (сверху)
+            while (logContainer.children.length > 50) {
+                logContainer.removeChild(logContainer.firstChild);
+            }
+            // Прокручиваем вниз за новыми строками, но не мешаем читать историю:
+            // если пользователь отлистал лог вверх, позицию не трогаем
+            if (atBottom) {
+                logContainer.scrollTop = logContainer.scrollHeight;
             }
         }
         console.log(`[ArcheAgeTool] ${message}`);
