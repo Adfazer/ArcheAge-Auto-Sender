@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ArcheAge Universal Tool (Cart + Pins + FunPay)
 // @namespace    http://tampermonkey.net/
-// @version      3.3
+// @version      3.4
 // @description  Автоматическая отправка предметов из корзины, активация пин-кодов и импорт пинов из заказов FunPay с единым интерфейсом
 // @author       You
 // @homepageURL  https://github.com/Adfazer/ArcheAge-Auto-Sender
@@ -19,6 +19,18 @@
 
 (function() {
     'use strict';
+
+    // Версия скрипта — видна в заголовке панели, чтобы можно было убедиться,
+    // что автообновление Tampermonkey подтянуло свежую версию
+    const SCRIPT_VERSION = (function() {
+        try {
+            return (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
+                ? GM_info.script.version
+                : '3.4';
+        } catch (e) {
+            return '3.4';
+        }
+    })();
 
     // Определение текущей страницы
     const isFunpayPage = window.location.hostname.includes('funpay.com') && /\/orders\/[^\/]+/.test(window.location.pathname);
@@ -119,6 +131,14 @@
             display: flex;
             align-items: center;
             gap: 8px;
+        }
+        .aa-tool-header .aa-tool-ver {
+            font-size: 11px;
+            font-weight: normal;
+            color: #8b93a7;
+            background: rgba(255,255,255,0.06);
+            border-radius: 4px;
+            padding: 1px 5px;
         }
         .aa-tool-toggle {
             background: none;
@@ -866,23 +886,47 @@
 
     // ==================== PIN FUNCTIONS ====================
 
-    // Сервер отвечает HTTP 200 даже на невалидный пин, а текст ошибки
-    // приходит внутри HTML — поэтому разбираем тело ответа, а не статус.
-    function parsePinResponse(rawText) {
-        const plainText = rawText
+    // Ответ сервера — HTML-фрагмент при HTTP 200 даже на невалидный пин,
+    // поэтому разбираем тело ответа, а не статус.
+    function stripPinHtml(text) {
+        return text
             .replace(/<script[\s\S]*?<\/script>/gi, ' ')
             .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+            .replace(/<br\s*\/?>/gi, ' ')
             .replace(/<[^>]+>/g, ' ')
-            .replace(/&nbsp;/gi, ' ')
-            .replace(/\s+/g, ' ');
+            .replace(/&nbsp;|&#160;|&#xa0;|&#8239;/gi, ' ')
+            .replace(/[\u00a0\u202f]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
 
+    // Текст блока сообщения (<div class="messages info">…): в нём же указан
+    // выданный предмет — «[10 дней] Покровительство Сиоль»
+    function getPinMessageText(rawText) {
+        const match = rawText.match(/<div[^>]*class="[^"]*messages[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+        return match ? stripPinHtml(match[1]) : '';
+    }
+
+    function extractPinReward(rawText, plainText) {
+        const source = getPinMessageText(rawText) || plainText;
+        const withDuration = source.match(/активирован[^[]*\[\s*([^\]]{1,40}?)\s*\]\s*([^\[\]«"]{2,80}?)\s*$/i);
+        if (withDuration) return `[${withDuration[1]}] ${withDuration[2]}`;
+        const withoutDuration = source.match(/активирован[^.[\]]*[.!]\s*([^\[\]«"]{2,80}?)\s*$/i);
+        return withoutDuration ? withoutDuration[1] : '';
+    }
+
+    function parsePinResponse(rawText) {
+        const plainText = stripPinHtml(rawText);
+
+        // Ошибки проверяем первыми: «уже активирован» тоже содержит «активирован»
         const errorPatterns = [
+            { re: /уже\s+активирован|(?:был|была|было|были)\s+активирован|активирован\s+ранее/i, msg: 'Пин уже активирован' },
+            { re: /не\s+активирован/i, msg: 'Пин-код не активирован' },
             { re: /некорректн\S*\s+пин/i, msg: 'Некорректный пин-код' },
-            { re: /уже\s+активирован/i, msg: 'Пин уже активирован' },
             { re: /не\s+найден/i, msg: 'Пин-код не найден' },
             { re: /истек|истёк|просрочен/i, msg: 'Срок действия истёк' },
             { re: /слишком\s+(много|часто)|превышен/i, msg: 'Слишком много запросов' },
-            { re: /авториз|войдите|login/i, msg: 'Требуется авторизация на сайте' },
+            { re: /авториз|войдите|войти\s+на\s+сайт|login/i, msg: 'Требуется авторизация на сайте' },
             { re: /"success"\s*:\s*false/i, msg: 'Ошибка активации' },
             { re: /ошибка/i, msg: 'Ошибка активации' }
         ];
@@ -892,15 +936,22 @@
             }
         }
 
+        // Успех. Сайт менял формулировки, поэтому принимаем все варианты:
+        // «Пин-код успешно активирован», «Пин код активирован» (пробел вместо
+        // дефиса — так сайт отвечает сейчас), «Пинкод активирован», JSON success:true.
+        // Внимание: \b в JS не работает с кириллицей, поэтому границы слов задаём
+        // явными проверками, а не \b.
         const successPatterns = [
+            /пин[\s\-–—]*код\s+(?:успешно\s+)?активирован/i,
             /успешно\s+активирован/i,
-            /пин-?код\s+активирован/i,
+            /активация\s+(?:пин-?кода?\s+)?(?:прошла\s+|завершена\s+)?успешн/i,
             /"success"\s*:\s*true/i,
-            /успешн/i
+            /активирован(?!н)/i,
+            /успешно(?![а-яё])/i
         ];
         for (const pattern of successPatterns) {
             if (pattern.test(plainText)) {
-                return { success: true, message: 'Успешно' };
+                return { success: true, message: 'Успешно', reward: extractPinReward(rawText, plainText) };
             }
         }
 
@@ -993,8 +1044,8 @@
 
             if (result.success === true) {
                 state.pin.successCount++;
-                updatePinItemStatus(i, 'success', result.message);
-                log(`✓ Пин ${pin}: активирован`, 'success');
+                updatePinItemStatus(i, 'success', result.reward ? `${result.message}: ${result.reward}` : result.message);
+                log(`✓ Пин ${pin}: активирован${result.reward ? ` — ${result.reward}` : ''}`, 'success');
             } else if (result.success === false) {
                 state.pin.errorCount++;
                 updatePinItemStatus(i, 'error', result.message);
@@ -1253,7 +1304,7 @@
 
         panel.innerHTML = `
             <div class="aa-tool-header">
-                <h3>🛒 FunPay → ArcheAge</h3>
+                <h3>🛒 FunPay → ArcheAge <span class="aa-tool-ver">v${SCRIPT_VERSION}</span></h3>
                 <button id="aa-tool-toggle-btn" class="aa-tool-toggle" title="Свернуть">◀</button>
             </div>
             <div class="aa-tool-content">
@@ -1313,7 +1364,7 @@ ${buyPinsButtonHtml()}
 
         panel.innerHTML = `
             <div class="aa-tool-header">
-                <h3>📦 Корзина Auto-Sender</h3>
+                <h3>📦 Корзина Auto-Sender <span class="aa-tool-ver">v${SCRIPT_VERSION}</span></h3>
                 <button id="aa-tool-toggle-btn" class="aa-tool-toggle" title="Свернуть">◀</button>
             </div>
             <div class="aa-tool-content">
@@ -1402,7 +1453,7 @@ ${buyPinsButtonHtml()}
 
         panel.innerHTML = `
             <div class="aa-tool-header">
-                <h3>🔑 Активация Пин-кодов</h3>
+                <h3>🔑 Активация Пин-кодов <span class="aa-tool-ver">v${SCRIPT_VERSION}</span></h3>
                 <button id="aa-tool-toggle-btn" class="aa-tool-toggle" title="Свернуть">◀</button>
             </div>
             <div class="aa-tool-content">
