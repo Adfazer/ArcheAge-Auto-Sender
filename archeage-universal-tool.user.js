@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ArcheAge Universal Tool (Cart + Pins + FunPay)
 // @namespace    http://tampermonkey.net/
-// @version      3.6
+// @version      3.7
 // @description  Автоматическая отправка предметов из корзины, активация пин-кодов и импорт пинов из заказов FunPay с единым интерфейсом
 // @author       You
 // @homepageURL  https://github.com/Adfazer/ArcheAge-Auto-Sender
@@ -868,6 +868,57 @@
         }
     }
 
+    // Разбор ответа отправки из корзины. Сервер отвечает HTTP 200 даже при отказе,
+    // признак успеха лежит в теле JSON:
+    //   {"result":1,"msg":"..."}  — предметы переданы
+    //   {"result":0,"msg":"Передача предметов на данный сервер временно недоступна."} — отказ
+    // При отказе строки из таблицы НЕ удаляем: предметы никуда не ушли.
+    function parseCartResponse(responseText) {
+        const rawText = String(responseText == null ? '' : responseText);
+        let data = null;
+        try {
+            data = JSON.parse(rawText);
+        } catch (e) {
+            data = null;
+        }
+
+        if (data && typeof data === 'object') {
+            const msg = typeof data.msg === 'string' ? data.msg
+                : (typeof data.message === 'string' ? data.message : '');
+            const result = data.result;
+
+            if (result === 1 || result === '1' || result === true || data.success === true) {
+                return { success: true, message: msg };
+            }
+
+            const hasError = result === 0 || result === '0' || result === false
+                || data.success === false
+                || Boolean(data.error || data.errors);
+            if (hasError) {
+                const message = msg || 'Сервер отклонил передачу предметов';
+                // Такие отказы повторятся и на остальных пачках — отправку прекращаем
+                return {
+                    success: false,
+                    message,
+                    blocking: /недоступн|авториз|войдите|сесси/i.test(message)
+                };
+            }
+
+            // Поля результата нет — не считаем успехом, чтобы не удалить неотправленное
+            return { success: null, message: msg ? `Ответ сервера не распознан (${msg})` : 'Ответ сервера не распознан' };
+        }
+
+        // Не JSON: чаще всего это фрагмент страницы (например, «нужно авторизоваться»)
+        const plain = stripPinHtml(rawText);
+        if (/авториз|войдите|регистрац/i.test(plain)) {
+            return { success: false, message: 'Требуется авторизация на сайте', blocking: true };
+        }
+        if (/ошибк|недоступн|нельзя|запрещ/i.test(plain)) {
+            return { success: false, message: plain.slice(0, 200), blocking: true };
+        }
+        return { success: null, message: 'Ответ сервера не распознан — проверьте корзину вручную' };
+    }
+
     async function sendCartBatch(itemIds, charValue) {
         const formData = new URLSearchParams();
         itemIds.forEach(id => formData.append(`items[${id}]`, 'on'));
@@ -886,13 +937,13 @@
             });
 
             if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
+                return { success: false, message: `HTTP ${response.status}` };
             }
 
-            const data = await response.json();
-            return { success: true, data };
+            const rawText = await response.text();
+            return parseCartResponse(rawText);
         } catch (error) {
-            return { success: false, error: error.message };
+            return { success: false, message: error.message };
         }
     }
 
@@ -939,6 +990,7 @@
 
         let successCount = 0;
         let errorCount = 0;
+        let warningCount = 0;
 
         for (let i = 0; i < batches.length; i++) {
             if (state.cart.shouldStop) {
@@ -953,20 +1005,29 @@
 
             const result = await sendCartBatch(itemIds, charValue);
 
-            if (result.success) {
+            if (result.success === true) {
                 successCount += batch.length;
-                log(`✓ Пачка ${i + 1} отправлена успешно`, 'success');
+                log(`✓ Пачка ${i + 1} отправлена успешно${result.message ? ` (${result.message})` : ''}`, 'success');
 
-                // Удаляем отправленные предметы из таблицы
+                // Удаляем предметы из таблицы ТОЛЬКО при подтверждённой отправке
                 batch.forEach(item => {
                     item.checkbox.checked = false;
                     if (item.row && item.row.parentNode) {
                         item.row.remove();
                     }
                 });
-            } else {
+            } else if (result.success === false) {
                 errorCount += batch.length;
-                log(`✗ Ошибка отправки пачки ${i + 1}: ${result.error}`, 'error');
+                log(`✗ Пачка ${i + 1} НЕ отправлена: ${result.message}`, 'error');
+                if (result.blocking) {
+                    log(`Передача на это сервер/персонажа сейчас недоступна — отправка остановлена. Предметы остались в корзине: проверьте выбор персонажа и попробуйте позже (осталось пачек: ${batches.length - i - 1}).`, 'error');
+                    break;
+                }
+            } else {
+                // Ответ не распознан — не рискуем: ничего не удаляем и не продолжаем
+                warningCount += batch.length;
+                log(`? Пачка ${i + 1}: ${result.message}. Строки оставлены в корзине, отправка остановлена — проверьте вручную.`, 'warning');
+                break;
             }
 
             updateRowHighlighting();
@@ -989,7 +1050,8 @@
         updateStats();
         refreshNameSelect();
 
-        log(`Отправка завершена. Успешно: ${successCount}, Ошибок: ${errorCount}`, successCount > 0 ? 'success' : 'error');
+        log(`Отправка завершена. Успешно: ${successCount}, Ошибок: ${errorCount}${warningCount > 0 ? `, Требуют проверки: ${warningCount}` : ''}`,
+            (errorCount === 0 && warningCount === 0) ? 'success' : (successCount > 0 ? 'warning' : 'error'));
         // Убран alert, только логирование
     }
 
